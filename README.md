@@ -70,7 +70,10 @@ friction, and where your page data goes:
 | Page data leaves machine | **never** — localhost only | → whatever LLM you configure | → your MCP client's LLM | → Anthropic API (screenshots/content) + usage data |
 | Agent freedom | any CLI-capable agent (SKILL.md included) | its own agent loop (needs an LLM — cloud or local) | any MCP-capable client | Claude only, paid plan |
 | Browsers | Chrome **and** Firefox, simultaneously | Chromium-family | Chromium-family for real-browser attach | Chrome only |
-| Cost | free, Apache-2.0 | free + LLM costs | free + LLM costs | paid subscription required |
+| Cost | free, Apache-2.0 | free, open source | free, open source | **paid Claude plan required** |
+
+(LLM costs for the driving agent apply equally to all four — the only
+mandatory extra is Claude for Chrome's subscription.)
 
 The short version: browser-use and Playwright can reach a real browser, but
 only through CDP ceremony or by kicking you out of your own profile.
