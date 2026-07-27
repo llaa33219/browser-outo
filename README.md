@@ -59,28 +59,29 @@ frame automatically.
 
 ## Why not browser-use / Playwright / Chrome MCP?
 
-All four tools are local software — the honest differences are in defaults,
-friction, and where your page data goes:
+All four tools are local software with CLI/skill-based agent interfaces —
+the honest differences are what browser you end up driving, and where your
+page data goes:
 
-| | **browser-outo** | browser-use | Playwright MCP | Claude for Chrome |
+| | **browser-outo** | browser-use | Playwright (CLI/MCP) | Claude for Chrome |
 |---|---|---|---|---|
-| Real browser, your logins | ✅ the default — one extension, zero browser-side setup | ⚠️ possible: CDP attach (approve remote-debugging prompt) or real profile (must fully quit Chrome first) | ⚠️ possible: `--cdp-endpoint` attach or persistent profile | ✅ the default |
-| Keeps working while you browse | ✅ your browser stays 100% usable | ❌ real-profile mode locks Chrome out | ❌ same lock issue | ✅ |
+| **Your live browser session** (same profile, same tabs, while you keep browsing) | ✅ the default — one extension, zero browser-side setup | ❌ since **Chrome 136** CDP is blocked on your real profile — you must automate a *copied* profile and log in again there | ❌ same Chrome 136 block; otherwise launches its own Chromium/Firefox/WebKit build, not your browser | ✅ |
 | "Being debugged" infobar | ✅ never (no debugger API) | ✅ none | ✅ none | ❌ shows (uses chrome.debugger) |
 | Page data leaves machine | **never** — localhost only | → whatever LLM you configure | → your MCP client's LLM | → Anthropic API (screenshots/content) + usage data |
-| Agent freedom | any CLI-capable agent (SKILL.md included) | its own agent loop (needs an LLM — cloud or local) | any MCP-capable client | Claude only, paid plan |
-| Browsers | Chrome **and** Firefox, simultaneously | Chromium-family | Chromium-family for real-browser attach | Chrome only |
+| Agent interface | any CLI-capable agent (SKILL.md included) | CLI + skills, or its own LLM agent loop | playwright-cli + skills, or MCP server | Claude only |
+| Browsers | Chrome **and** Firefox, simultaneously | Chromium (CDP) | launches Chromium/Firefox/WebKit; attaching to your *existing* browser is Chromium-only | Chrome only |
 | Cost | free, Apache-2.0 | free, open source | free, open source | **paid Claude plan required** |
 
 (LLM costs for the driving agent apply equally to all four — the only
 mandatory extra is Claude for Chrome's subscription.)
 
-The short version: browser-use and Playwright can reach a real browser, but
-only through CDP ceremony or by kicking you out of your own profile.
-Claude for Chrome is the closest in spirit, but it ships your page content
-to Anthropic, flashes a debugging banner, and only works with a paid Claude
-plan. browser-outo is a plain CLI against the browser you're already using —
-no fingerprint, no banner, no cloud, no lock-in.
+The short version: since Chrome 136 killed remote debugging on real
+profiles, CDP-based tools can only drive a *copy* of your browser — a
+separate profile that drifts out of sync with your daily one. Claude for
+Chrome is the closest in spirit, but it ships your page content to
+Anthropic, flashes a debugging banner, and requires a paid plan.
+browser-outo drives the browser you're literally using right now, from any
+agent — no fingerprint, no banner, no profile copies, no lock-in.
 
 ## For AI agents
 
