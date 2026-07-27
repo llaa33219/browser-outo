@@ -59,22 +59,25 @@ frame automatically.
 
 ## Why not browser-use / Playwright / Chrome MCP?
 
-| | **browser-outo** | browser-use | Playwright (MCP) | Anthropic Chrome MCP |
-|---|---|---|---|---|
-| Uses **your** browser + logins | ✅ | ❌ (fresh cloud/local profile) | ❌ (fresh profile) | ✅ |
-| Fully local, no external calls | ✅ | ❌ (LLM API in the loop) | ✅ | ✅ |
-| CAPTCHA on a real profile | ✅ passes as you | ❌ flagged as bot | ❌ flagged as bot | ✅ |
-| `navigator.webdriver` hidden | ✅ | ⚠️ patchable | ⚠️ patchable | ✅ |
-| Setup | one extension + `npx skills add` | Python env + LLM key + browser | Node + browser download | extension + MCP config |
-| Agent integration | any CLI-capable agent (SKILL.md included) | its own agent loop | MCP servers | Claude only |
-| Multi-browser at once | ✅ Chrome + Firefox simultaneously | ❌ | ❌ | ❌ |
+All four tools are local software — the honest differences are in defaults,
+friction, and where your page data goes:
 
-browser-use and Playwright drive a **separate, automation-controlled
-browser** — sites see a fresh profile with an automation fingerprint and no
-history, which is exactly what CAPTCHAs and bot-walls punish. The Anthropic
-Chrome MCP shares the "your real browser" idea but only works with Claude
-via MCP. browser-outo is a plain CLI: any agent or script that can run shell
-commands can use it, against the browser you already trust.
+| | **browser-outo** | browser-use | Playwright MCP | Claude for Chrome |
+|---|---|---|---|---|
+| Real browser, your logins | ✅ the default — one extension, zero browser-side setup | ⚠️ possible: CDP attach (approve remote-debugging prompt) or real profile (must fully quit Chrome first) | ⚠️ possible: `--cdp-endpoint` attach or persistent profile | ✅ the default |
+| Keeps working while you browse | ✅ your browser stays 100% usable | ❌ real-profile mode locks Chrome out | ❌ same lock issue | ✅ |
+| "Being debugged" infobar | ✅ never (no debugger API) | ✅ none | ✅ none | ❌ shows (uses chrome.debugger) |
+| Page data leaves machine | **never** — localhost only | → whatever LLM you configure | → your MCP client's LLM | → Anthropic API (screenshots/content) + usage data |
+| Agent freedom | any CLI-capable agent (SKILL.md included) | its own agent loop (needs an LLM — cloud or local) | any MCP-capable client | Claude only, paid plan |
+| Browsers | Chrome **and** Firefox, simultaneously | Chromium-family | Chromium-family for real-browser attach | Chrome only |
+| Cost | free, Apache-2.0 | free + LLM costs | free + LLM costs | paid subscription required |
+
+The short version: browser-use and Playwright can reach a real browser, but
+only through CDP ceremony or by kicking you out of your own profile.
+Claude for Chrome is the closest in spirit, but it ships your page content
+to Anthropic, flashes a debugging banner, and only works with a paid Claude
+plan. browser-outo is a plain CLI against the browser you're already using —
+no fingerprint, no banner, no cloud, no lock-in.
 
 ## For AI agents
 
