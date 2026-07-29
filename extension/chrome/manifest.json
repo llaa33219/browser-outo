@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "browser-outo",
   "version": "0.3.0",
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAv2DVDS6o0QOWYdpglx9YFYMdQREX3ezwmxdaMdh5YKnO8/X0U8u9/R+Bdd5xlAwyt/2/rOrMCo+QOgb/KAfC6NiHEDEnKm/dJdHWk2ioDNllFqoK6lpbh+dxuuqBM10OmmiDa8DE0crTex9v/daRvT2JuZgyJK0VDAJgREdNnPj43JwzutV2sCDW3yKAGyQ/+WBOsW987OWcAF/Z66w4QH/qlPn8mPWovsVp1sKhvsfP0L9oNraxqGRJo2w3nZRwyZ2HqfLc78XdwINnYpbcDhYkCchkCfUEfW7apAuaIDIhDn2yV+aAPDumcuEi1FINx8uKLpZStOoDACU76ozpNwIDAQAB",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0u4hrJzMGGXizGvduG0XjQgfFj3Q2jI/5+zVIaUABD/R7mVvImWDF1H3EPY9CFDbG5Wi5+waQ4WIN5yKux59NlMtmG+pj7QhQ8QYB4zQZIzvDwSwT8BYR6+4TwL4l+f39osPFGFuw1+AV8eOqdHq2x/e5LlrwUEbKVDRLydQ0yDj+XCqZXGYLyfxWe550TTAdVD8CcpaGJUgHc7bMfZa78ZfHjHaGKhfxM96Mzt1eY2w4DB8ypMEdA+LYGin+vvIEQV+VMChfh9z8DnQHaFaIhepqQMT7fuEhF7ENIMzfYzfger1k5zQ58zrdIcohIRch2NC/2EcZ7EoJ/Q8nvK2KQIDAQAB",
   "description": "The browser extension required for browser-outo to control your browser.",
   "icons": {
     "16": "icons/icon16.png",
