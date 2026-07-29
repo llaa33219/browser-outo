@@ -64,8 +64,9 @@ CLI when needed):
 npx skills add llaa33219/browser-outo
 ```
 
-**2. The browser extension** is coming soon to the Chrome Web Store and
-Firefox Add-ons.
+**2. The browser extension** is available on the
+[Chrome Web Store](https://chromewebstore.google.com/detail/browser-outo/gpihpfdeknjocgdlgfmkhjkbjpahgggi)
+and coming soon to Firefox Add-ons.
 
 **3. Start the local server:**
 
