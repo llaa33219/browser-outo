@@ -23,8 +23,7 @@
 
   var WS_URL = "ws://127.0.0.1:11681/ws";
   var HEALTH_URL = "http://127.0.0.1:11681/";
-  var EXT_VERSION = "0.2.0";
-  var NATIVE_HOST = "browser_outo";
+  var EXT_VERSION = "0.3.0";
   var HEARTBEAT_MS = 20000;
   var BACKOFF_MIN_MS = 1000;
   var BACKOFF_MAX_MS = 30000;
@@ -38,19 +37,9 @@
   var reconnectTimer = null;
   var registeredExtId = null;
 
-  // --- Native messaging transport state (preferred over WS when available) ---
-  var nativePort = null;          // browser.runtime.Port to the native host, or null
-  var nativeConfirmed = false;    // has the native port delivered any message?
-  var transport = null;           // "native" | "websocket" | null
-  var nativeBackoffMs = BACKOFF_MIN_MS;
-  var nativeReconnectTimer = null;
-
   // ---------------------------------------------------------------- send helpers
 
   function safeSend(obj) {
-    if (nativePort) {
-      try { nativePort.postMessage(obj); return true; } catch (e) { return false; }
-    }
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return false;
     }
@@ -79,105 +68,6 @@
 
   function sendError(reqId, message) {
     sendResponse(reqId, false, message);
-  }
-
-  // ---------------------------------------------------------------- native transport
-  //
-  // The native host speaks the exact same JSON protocol as the WS server;
-  // only the transport differs. Preferred over WS when the host is installed.
-
-  function setTransport(t) {
-    if (transport === t) return;
-    transport = t;
-    console.log("[outo] transport: " + t);
-  }
-
-  function tryNative() {
-    if (nativePort || nativeReconnectTimer !== null) return;
-
-    var port;
-    try {
-      port = browser.runtime.connectNative(NATIVE_HOST);
-    } catch (e) {
-      onNativeUnavailable();
-      return;
-    }
-
-    nativePort = port;
-    nativeConfirmed = false;
-
-    port.onMessage.addListener(function (msg) {
-      // First message confirms the host is real (not an immediate disconnect).
-      if (!nativeConfirmed) {
-        nativeConfirmed = true;
-        nativeBackoffMs = BACKOFF_MIN_MS;
-        teardownWSForNativeTakeover();
-        setTransport("native");
-      }
-      if (!msg || typeof msg !== "object") return;
-      handleServerFrame(msg);
-    });
-
-    port.onDisconnect.addListener(function () {
-      var err = browser.runtime.lastError;
-      nativePort = null;
-      var wasConfirmed = nativeConfirmed;
-      nativeConfirmed = false;
-      clearHeartbeat();
-      if (wasConfirmed || err) {
-        console.log("[outo] native disconnected" + (err && err.message ? ": " + err.message : ""));
-      }
-      setTransport("websocket");
-      connect();
-      scheduleNativeRetry();
-    });
-
-    try {
-      port.postMessage({ type: "register", browser: "firefox", ext_version: EXT_VERSION });
-    } catch (e) {
-      // onDisconnect will handle cleanup.
-    }
-  }
-
-  function teardownWSForNativeTakeover() {
-    if (socket) {
-      try { socket.onclose = null; socket.onerror = null; socket.close(); } catch (e) {}
-      socket = null;
-    }
-    if (reconnectTimer !== null) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
-    backoffMs = BACKOFF_MIN_MS;
-  }
-
-  function onNativeUnavailable() {
-    setTransport("websocket");
-    connect();
-    scheduleNativeRetry();
-  }
-
-  function scheduleNativeRetry() {
-    if (nativeReconnectTimer !== null) return;
-    var delay = nativeBackoffMs;
-    nativeBackoffMs = Math.min(BACKOFF_MAX_MS, nativeBackoffMs * 2);
-    nativeReconnectTimer = setTimeout(function () {
-      nativeReconnectTimer = null;
-      if (!nativePort) tryNative();
-    }, delay);
-  }
-
-  // Top-level transport selection: native-first. If native is pending,
-  // ensure the WS fallback runs for service continuity.
-  function connectTransport() {
-    if (nativePort) return;
-    if (nativeReconnectTimer === null) {
-      tryNative();
-      return;
-    }
-    if (!socket || (socket.readyState !== WebSocket.OPEN && socket.readyState !== WebSocket.CONNECTING)) {
-      if (reconnectTimer === null) connect();
-    }
   }
 
   // ---------------------------------------------------------------- ws lifecycle
@@ -690,5 +580,5 @@
   browser.runtime.onInstalled.addListener(function () { reinjectContentScripts(); });
   browser.runtime.onStartup.addListener(function () { reinjectContentScripts(); });
 
-  connectTransport();
+  connect();
 })();

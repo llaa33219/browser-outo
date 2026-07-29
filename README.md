@@ -19,118 +19,63 @@ your machine.
 - **No automation fingerprint.** Nothing is injected into the page before you
   say so, and there's no `navigator.webdriver` flag. Commands run through a
   normal browser extension, not an automation driver.
-- **Fully local.** A per-run token-authenticated bridge between the CLI
-  and the extension. Native messaging is the default transport (no TCP
-  port at all); a WebSocket on `127.0.0.1:11681` is the fallback when
-  the native host isn't installed. No telemetry, no external calls.
+- **Fully local.** The CLI uses token-authenticated HTTP to a local server on
+  `127.0.0.1:11681`, and the browser extension connects to that server over
+  WebSocket. No telemetry, no external calls.
 
 ## How it works
 
-Two transports; native is the default after `browser-outo install-native`.
-
-**WebSocket (fallback)** — when the native host isn't installed:
-
 ```
-┌─────────────┐   HTTP    ┌──────────────────┐  WebSocket  ┌─────────────────┐
-│ browser-outo│ ────────► │ local server     │ ◄────────── │ browser         │
-│ CLI (agent) │           │ 127.0.0.1:11681  │  (outbound) │ extension       │
-└─────────────┘           └──────────────────┘             └─────────────────┘
+┌─────────────┐  HTTP + token  ┌──────────────────┐  WebSocket  ┌─────────────────┐
+│ browser-outo│ ◄────────────► │ local server     │ ◄─────────► │ browser         │
+│ CLI (agent) │                │ 127.0.0.1:11681  │  (outbound) │ extension       │
+└─────────────┘                └──────────────────┘             └─────────────────┘
 ```
 
-The extension connects **outbound** to the local server, so there's nothing
-to open in your firewall and no pairing step. Multiple browsers can connect
-at once — each gets a numeric `EXT_ID` you target per command.
+Run `browser-outo serve` to start the local server. The CLI sends commands to
+it over HTTP with a bearer token, and the extension opens an outbound
+WebSocket connection to it. Multiple browsers can connect at once, and each
+gets a numeric `EXT_ID` you target per command.
 
-**Native (default)** — after `browser-outo install-native`:
+## Security and limitations
 
-```
-                          unix socket                     stdio
-┌─────────────┐       (0700 dir / 0600 sock)      ┌──────────────┐   (browser-spawned)   ┌────────────────┐
-│ browser-outo│  ◄─────────────────────────────►  │ native host  │  ◄─────────────────► │ browser        │
-│ CLI (agent) │                                    │ (per browser)│                      │ extension      │
-└─────────────┘                                    └──────────────┘                      └────────────────┘
-                                                  no TCP port at all
-```
+Each server start creates a fresh bearer token in a per-user state directory.
+The directory is mode `0700`, and the token file is mode `0600`. API requests
+require the token, the WebSocket accepts only extension origins, and the server
+stays on loopback unless you pass `--allow-remote`.
 
-No local server is involved. The browser spawns the native host itself and
-the extension talks to it over stdio; the CLI talks to the same host over a
-per-user Unix socket. Downgrades to WebSocket (deleted manifests, locked
-browser profile) are visible — the extension logs
-`[outo] transport: native|websocket` at every connect and `browser-outo
-extensions` includes a `transport` column.
-
-## Security
-
-Every server start writes a fresh per-run bearer token
-(`token-<port>`) into a per-user state directory: `$XDG_RUNTIME_DIR`
-or `~/.local/state` on Linux, `~/Library/Application Support` on
-macOS, `%LOCALAPPDATA%` on Windows. The directory is `0700`, the file
-`0600`. The browser-outo CLI reads the token automatically; `/api/*`
-requires it, `GET /` stays open as a health probe. CORS is removed
-entirely. `/ws` only accepts `chrome-extension://` and
-`moz-extension://` origins. The server refuses to bind a non-loopback
-address unless you pass `--allow-remote`.
-
-With `browser-outo install-native` set up, the extension talks to a
-browser-spawned native host over stdio (no TCP port), and the CLI
-talks to that host over a per-user Unix socket (`0700` dir, `0600`
-sock, `SO_PEERCRED` UID check, plus a per-browser native token on the
-first frame). This removes the "kill the server and squat port 11681"
-attack entirely for extensions that connect natively.
-
-The honest floor: same-UID local malware can read your token, replace
-the native host, or delete the manifests to force a WebSocket
-fallback. This matches Chromium's own stance on native messaging —
-there is no portable defense against a same-UID attacker. The active
-transport is always observable: the extension logs
-`[outo] transport: native|websocket` at every connect, and
-`browser-outo extensions` includes a `transport` column.
+A process running as the same user can kill the server, bind to its loopback
+port, and impersonate browser-outo to an extension that connects afterward.
+This is a known, accepted limitation of the local WebSocket architecture.
 
 ## Install
 
-All local:
-
-**1. The agent skill** (teaches your AI agent how to drive it — the skill
-also installs the CLI for you when needed):
+**1. The agent skill** (teaches your AI agent how to drive it and installs the
+CLI when needed):
 
 ```bash
 npx skills add llaa33219/browser-outo
 ```
 
-**2. The browser extension** — coming soon to the Chrome Web Store and
+**2. The browser extension** is coming soon to the Chrome Web Store and
 Firefox Add-ons.
 
-The Chrome extension is pinned to a fixed ID
-(`jdpmmcbgncnlmcaaggkfccdmehkgnkjc`) so the native messaging allowlist
-stays stable across unpacked loads. After pulling updates, hit
-"Reload" on `chrome://extensions` — the first reload after the pin
-landed will switch the on-screen ID to the pinned one. The matching
-private key lives at `~/.config/browser-outo/extension-key.pem` (mode
-`0600`) and is never checked in.
-
-**3. (Recommended) Native transport** — once per machine:
+**3. Start the local server:**
 
 ```bash
-browser-outo install-native
+browser-outo serve
 ```
 
-This writes the native host wrapper plus the Chrome and Firefox
-manifest files to their standard locations (Linux:
-`~/.config/google-chrome/`, `~/.config/chromium/`, `~/.mozilla/`,
-`~/.config/mozilla/`; macOS equivalents in
-`Library/Application Support`). Reload the extension after it
-finishes — it will log `[outo] transport: native` from that point on
-and no TCP port is used. Windows is unsupported and stays on the
-WebSocket path. The command is idempotent; re-run it any time to
-refresh.
+The server listens on `127.0.0.1:11681`. Leave it running while browser-outo
+is in use. The extension connects automatically, though its retry loop means
+the first connection after a restart can take a few seconds.
 
-Then just ask your agent to do things in your browser — open pages, fill
-forms, read content, take screenshots. The agent handles every command
-through the skill; you never have to learn a CLI.
+Then ask your agent to open pages, fill forms, read content, or take
+screenshots. The agent handles every command through the skill.
 
-It works inside iframes too — elements from all frames (CAPTCHA widgets
-included) are merged into one numbered list, and clicks route to the right
-frame automatically.
+It works inside iframes too. Elements from all frames are merged into one
+numbered list, and clicks route to the right frame automatically.
+
 
 ## Why not browser-use / Playwright / Chrome MCP?
 

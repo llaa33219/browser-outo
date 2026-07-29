@@ -26,7 +26,7 @@ from .auth import write_token
 
 logger = logging.getLogger("browser_outo.server")
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 # Heartbeat: server pings every N seconds. Pongs are tolerated-but-optional.
 PING_INTERVAL = 20.0
