@@ -46,7 +46,14 @@ stays on loopback unless you pass `--allow-remote`.
 
 A process running as the same user can kill the server, bind to its loopback
 port, and impersonate browser-outo to an extension that connects afterward.
-This is a known, accepted limitation of the local WebSocket architecture.
+This is a known, accepted limitation of the local WebSocket architecture. The
+stronger alternative (browser native messaging) only works when the browser
+and the CLI run on the same machine, and it requires registering a per-browser
+host manifest whose location varies across browsers, packaging formats, and
+sandboxed installs — so it cannot cover the diverse environments browser-outo
+supports (remote browsers, VMs, containers, non-standard installs). The
+WebSocket design is what makes those setups work at all, and this limitation
+is the price of that universality.
 
 ## Install
 
