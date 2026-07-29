@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
   "name": "browser-outo",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAv2DVDS6o0QOWYdpglx9YFYMdQREX3ezwmxdaMdh5YKnO8/X0U8u9/R+Bdd5xlAwyt/2/rOrMCo+QOgb/KAfC6NiHEDEnKm/dJdHWk2ioDNllFqoK6lpbh+dxuuqBM10OmmiDa8DE0crTex9v/daRvT2JuZgyJK0VDAJgREdNnPj43JwzutV2sCDW3yKAGyQ/+WBOsW987OWcAF/Z66w4QH/qlPn8mPWovsVp1sKhvsfP0L9oNraxqGRJo2w3nZRwyZ2HqfLc78XdwINnYpbcDhYkCchkCfUEfW7apAuaIDIhDn2yV+aAPDumcuEi1FINx8uKLpZStOoDACU76ozpNwIDAQAB",
   "description": "The browser extension required for browser-outo to control your browser.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-  "permissions": ["tabs", "alarms", "scripting", "webNavigation", "storage"],
+  "permissions": ["tabs", "alarms", "scripting", "webNavigation", "storage", "nativeMessaging"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"

@@ -144,10 +144,38 @@
     return parts.join(" ");
   }
 
+  // Per-page-load nonce handshake with content.js (isolated world). See the
+  // matching comment in content.js for the security model — this only stops
+  // accidental / low-effort forgery, not a determined page script.
+  var outoNonce = null;
+  window.addEventListener("message", function (event) {
+    if (event.source !== window) {
+      return;
+    }
+    var data = event.data;
+    if (!data || data.__outo !== true) {
+      return;
+    }
+    if (data.kind === "init" && typeof data.nonce === "string") {
+      outoNonce = data.nonce;
+    }
+  });
+
   function emit(level, args) {
+    if (outoNonce === null) {
+      // No nonce yet → content would drop anyway, so stay quiet.
+      return;
+    }
     var text = formatArgs(args);
     try {
-      window.postMessage({ __outo: true, level: level, text: text, timestamp: Date.now() }, "*");
+      window.postMessage({
+        __outo: true,
+        kind: "console",
+        level: level,
+        text: text,
+        timestamp: Date.now(),
+        nonce: outoNonce
+      }, "*");
     } catch (e) {
       // postMessage itself should never fail for structured-cloneable data,
       // but we must not let the page's own console.* throw.

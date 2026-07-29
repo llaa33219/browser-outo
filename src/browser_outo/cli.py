@@ -1,14 +1,18 @@
 """Command-line interface for browser-outo.
 
-Talks to the local server over HTTP. Human-readable plain-text output — no
-``rich`` dependency. Server host/port default to 127.0.0.1:11681 but can be
-overridden via ``--port`` (at the group level) or ``BROWSER_OUTO_PORT``.
+Transport is **native-first**: when native-messaging host sockets exist under
+``token_dir()/native/`` the CLI talks to them directly over a Unix domain
+socket (per-command auth token). When no sockets exist it falls back to the
+original HTTP+Bearer path against ``browser-outo serve``. Every command works
+identically in either mode; only the ``ext`` argument's accepted shape differs
+— native mode takes a browser name (``chrome``/``firefox``) or a 1-based index
+into the sorted socket list, while HTTP fallback takes the numeric ``ext_id``
+the server assigned.
 """
 
 from __future__ import annotations
 
 import base64
-import os
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -16,9 +20,16 @@ from typing import Any, Iterable
 import click
 import httpx
 
+from . import _native
+from .auth import read_token, resolve_port
+
 DEFAULT_PORT = 11681
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_TIMEOUT = 60.0  # client-side HTTP timeout (> server's 30s default)
+
+# Hosts considered loopback. Binding anything else without ``--allow-remote``
+# is refused — the server is per-run-token authed, not network authed.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
 # --------------------------------------------------------------------------- #
@@ -37,13 +48,8 @@ DEFAULT_TIMEOUT = 60.0  # client-side HTTP timeout (> server's 30s default)
 @click.pass_context
 def main(ctx: click.Context, port: int | None) -> None:
     """browser-outo — drive a real browser from AI agents."""
-    if port is None:
-        try:
-            port = int(os.environ.get("BROWSER_OUTO_PORT", DEFAULT_PORT))
-        except ValueError:
-            port = DEFAULT_PORT
     ctx.ensure_object(dict)
-    ctx.obj["port"] = port
+    ctx.obj["port"] = resolve_port(port, DEFAULT_PORT)
 
 
 # --------------------------------------------------------------------------- #
@@ -65,16 +71,39 @@ def _request(
 ) -> httpx.Response:
     port = ctx.obj["port"]
     url = f"http://127.0.0.1:{port}{path}"
+    headers = _auth_headers(port)
     try:
-        with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
+        with httpx.Client(timeout=DEFAULT_TIMEOUT, headers=headers) as client:
             if method == "GET":
-                return client.get(url)
-            return client.post(url, json=json_body)
+                resp = client.get(url)
+            else:
+                resp = client.post(url, json=json_body)
     except httpx.ConnectError:
         _die_not_running(port)
     except httpx.HTTPError as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
+
+    if resp.status_code == 401:
+        click.echo(
+            "browser-outo server rejected the request (401). The auth token "
+            "is missing or stale.\nRestart `browser-outo serve` to refresh it.",
+            err=True,
+        )
+        sys.exit(1)
+    return resp
+
+
+def _auth_headers(port: int) -> dict[str, str]:
+    """Bearer header for the token file on ``port``, or empty dict.
+
+    Empty dict (no Authorization header) when the token file is missing —
+    the server will return 401 and the caller prints the restart hint.
+    """
+    token = read_token(port)
+    if token is None:
+        return {}
+    return {"Authorization": f"Bearer {token}"}
 
 
 def _unwrap(resp: httpx.Response) -> dict[str, Any]:
@@ -98,13 +127,48 @@ def _unwrap(resp: httpx.Response) -> dict[str, Any]:
 
 def _command(
     ctx: click.Context,
-    ext_id: int,
+    ext_id: str,
     action: str,
     params: dict[str, Any] | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
+    """Dispatch a command via native socket first, HTTP fallback second.
+
+    Returns the command's ``data`` payload on success and exits the process
+    with a human-readable message on any failure (transport lost, timeout,
+    extension error, or HTTP error). Native transport-lost mid-command is
+    distinguished with exit code 3 so an agent does not blindly retry an
+    operation whose side effects may already have run.
+    """
+    try:
+        native = _native.native_command(ext_id, action, params or {}, timeout)
+    except _native.TransportLost:
+        click.echo(
+            "command outcome unknown (transport lost; side effects may have happened)",
+            err=True,
+        )
+        sys.exit(3)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    if native is not None:
+        if not native.get("ok", False):
+            click.echo(f"Error: {native.get('error', 'unknown error')}", err=True)
+            sys.exit(1)
+        return native.get("data") or {}
+
+    # No native sockets — fall back to the HTTP+Bearer path.
+    try:
+        ext_id_int = int(ext_id)
+    except (TypeError, ValueError):
+        click.echo(
+            f"Error: {ext_id!r} is not a valid extension id "
+            "(no native sockets present; HTTP fallback needs a numeric ext_id).",
+            err=True,
+        )
+        sys.exit(1)
     body = {
-        "ext_id": ext_id,
+        "ext_id": ext_id_int,
         "action": action,
         "params": params or {},
         "timeout": timeout,
@@ -178,30 +242,77 @@ def _print_elements(elements: Iterable[dict[str, Any]], show_bbox: bool = False)
 
 
 @main.command()
-@click.option("--port", default=DEFAULT_PORT, help="Port to listen on.")
+@click.option("--port", "port", type=int, default=None,
+              help="Port to listen on (env BROWSER_OUTO_PORT, default 11681).")
 @click.option("--host", default=DEFAULT_HOST, help="Host to bind.")
-def serve(port: int, host: str) -> None:
+@click.option("--allow-remote", is_flag=True,
+              help="Allow binding to non-loopback hosts (NOT recommended; "
+                   "the server is per-run-token authed, not network authed).")
+def serve(port: int | None, host: str, allow_remote: bool) -> None:
     """Run the browser-outo server."""
+    if not allow_remote and host not in _LOOPBACK_HOSTS:
+        click.echo(
+            f"Refusing to bind non-loopback host {host!r}. The browser-outo "
+            "server trusts any caller with the per-run token, so exposing it "
+            "to the network is unsafe.\nPass --allow-remote to override.",
+            err=True,
+        )
+        sys.exit(1)
+
     import uvicorn
 
     from .server import create_app
 
-    app = create_app()
-    # Equivalent to `uvicorn browser_outo.server:app --host H --port P`.
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    final_port = resolve_port(port, DEFAULT_PORT)
+    app = create_app(final_port)
+    uvicorn.run(app, host=host, port=final_port, log_level="info")
+
+
+@main.command(name="install-native")
+@click.option(
+    "--chrome-extension-id",
+    "chrome_ids",
+    multiple=True,
+    help="Additional Chrome extension origin/id to allow (e.g. an unpacked dev "
+    "id). May be repeated. The pinned store id is always included.",
+)
+def install_native(chrome_ids: tuple[str, ...]) -> None:
+    """Write the native-messaging wrapper script and browser manifests."""
+    if sys.platform == "win32":
+        click.echo(
+            "Windows native messaging is not supported; use WS mode "
+            "(browser-outo serve). The extension falls back automatically."
+        )
+        return
+    written = _native.install_native(chrome_ids)
+    for p in written:
+        click.echo(f"wrote: {p}")
+    click.echo(
+        "\nDone. Fully quit and restart Chrome/Chromium/Firefox (or reload the "
+        "extension) so they pick up the new native host."
+    )
 
 
 @main.command()
 @click.pass_context
 def extensions(ctx: click.Context) -> None:
     """List connected extensions."""
+    sockets = _native.native_sockets()
+    if sockets:
+        rows = [["ext_id", "browser", "transport", "status"]]
+        for idx, p in enumerate(sorted(sockets), 1):
+            browser = p.stem
+            alive = _native.native_alive(browser)
+            rows.append([str(idx), browser, "native", "live" if alive else "stale"])
+        _print_table(rows)
+        return
     resp = _request(ctx, "GET", "/api/extensions")
     data = _unwrap(resp)
     exts = data.get("data", [])
     if not exts:
         click.echo("No extensions connected.")
         return
-    rows = [["ext_id", "browser", "ext_version", "connected_at"]]
+    rows = [["ext_id", "browser", "ext_version", "connected_at", "transport"]]
     for e in exts:
         rows.append(
             [
@@ -209,17 +320,18 @@ def extensions(ctx: click.Context) -> None:
                 str(e.get("browser", "")),
                 str(e.get("ext_version", "")),
                 str(e.get("connected_at", "")),
+                "websocket",
             ]
         )
     _print_table(rows)
 
 
 @main.command(name="open")
-@click.argument("ext_id", type=int)
+@click.argument("ext_id")
 @click.argument("url")
 @click.option("--background", is_flag=True, help="Open the tab inactive.")
 @click.pass_context
-def open_cmd(ctx: click.Context, ext_id: int, url: str, background: bool) -> None:
+def open_cmd(ctx: click.Context, ext_id: str, url: str, background: bool) -> None:
     """Open a URL in a new tab."""
     data = _command(
         ctx, ext_id, "open_tab", {"url": url, "active": not background}
@@ -228,9 +340,9 @@ def open_cmd(ctx: click.Context, ext_id: int, url: str, background: bool) -> Non
 
 
 @main.command()
-@click.argument("ext_id", type=int)
+@click.argument("ext_id")
 @click.pass_context
-def tabs(ctx: click.Context, ext_id: int) -> None:
+def tabs(ctx: click.Context, ext_id: str) -> None:
     """List tabs in an extension."""
     data = _command(ctx, ext_id, "list_tabs", {})
     tab_list = data.get("tabs", [])
@@ -252,12 +364,12 @@ def tabs(ctx: click.Context, ext_id: int) -> None:
 
 
 @main.command()
-@click.argument("ext_id", type=int)
+@click.argument("ext_id")
 @click.argument("tab_id", type=int)
 @click.option("-o", "--output", "output", type=click.Path(), default=None,
               help="Write HTML to this file instead of stdout.")
 @click.pass_context
-def html(ctx: click.Context, ext_id: int, tab_id: int, output: str | None) -> None:
+def html(ctx: click.Context, ext_id: str, tab_id: int, output: str | None) -> None:
     """Fetch rendered HTML of a tab."""
     data = _command(ctx, ext_id, "get_html", {"tab_id": tab_id})
     text = str(data.get("html", ""))
@@ -269,11 +381,11 @@ def html(ctx: click.Context, ext_id: int, tab_id: int, output: str | None) -> No
 
 
 @main.command()
-@click.argument("ext_id", type=int)
+@click.argument("ext_id")
 @click.argument("tab_id", type=int)
 @click.option("--level", default=None, help="Filter by level (error/warn/info/log/...).")
 @click.pass_context
-def console(ctx: click.Context, ext_id: int, tab_id: int, level: str | None) -> None:
+def console(ctx: click.Context, ext_id: str, tab_id: int, level: str | None) -> None:
     """Fetch console log of a tab."""
     data = _command(ctx, ext_id, "get_console", {"tab_id": tab_id})
     entries = data.get("entries", [])
@@ -291,22 +403,22 @@ def console(ctx: click.Context, ext_id: int, tab_id: int, level: str | None) -> 
 
 
 @main.command()
-@click.argument("ext_id", type=int)
+@click.argument("ext_id")
 @click.argument("tab_id", type=int)
 @click.option("--bbox", is_flag=True, help="Show absolute viewport bounding boxes instead of selectors")
 @click.pass_context
-def elements(ctx: click.Context, ext_id: int, tab_id: int, bbox: bool) -> None:
+def elements(ctx: click.Context, ext_id: str, tab_id: int, bbox: bool) -> None:
     """List interactive elements in a tab."""
     data = _command(ctx, ext_id, "list_elements", {"tab_id": tab_id})
     _print_elements(data.get("elements", []), show_bbox=bbox)
 
 
 @main.command(name="click")
-@click.argument("ext_id", type=int)
+@click.argument("ext_id")
 @click.argument("tab_id", type=int)
 @click.argument("index", type=int)
 @click.pass_context
-def click_cmd(ctx: click.Context, ext_id: int, tab_id: int, index: int) -> None:
+def click_cmd(ctx: click.Context, ext_id: str, tab_id: int, index: int) -> None:
     """Click element at INDEX in a tab."""
     _command(
         ctx,
@@ -318,14 +430,14 @@ def click_cmd(ctx: click.Context, ext_id: int, tab_id: int, index: int) -> None:
 
 
 @main.command(name="type")
-@click.argument("ext_id", type=int)
+@click.argument("ext_id")
 @click.argument("tab_id", type=int)
 @click.argument("index", type=int)
 @click.argument("text")
 @click.option("--enter", is_flag=True, help="Press Enter after typing.")
 @click.pass_context
 def type_cmd(
-    ctx: click.Context, ext_id: int, tab_id: int, index: int, text: str, enter: bool
+    ctx: click.Context, ext_id: str, tab_id: int, index: int, text: str, enter: bool
 ) -> None:
     """Type TEXT into element at INDEX."""
     _command(
@@ -340,11 +452,11 @@ def type_cmd(
 
 
 @main.command()
-@click.argument("ext_id", type=int)
+@click.argument("ext_id")
 @click.argument("tab_id", type=int)
 @click.argument("index", type=int)
 @click.pass_context
-def hover(ctx: click.Context, ext_id: int, tab_id: int, index: int) -> None:
+def hover(ctx: click.Context, ext_id: str, tab_id: int, index: int) -> None:
     """Hover element at INDEX in a tab."""
     _command(
         ctx,
@@ -356,13 +468,13 @@ def hover(ctx: click.Context, ext_id: int, tab_id: int, index: int) -> None:
 
 
 @main.command(name="select")
-@click.argument("ext_id", type=int)
+@click.argument("ext_id")
 @click.argument("tab_id", type=int)
 @click.argument("index", type=int)
 @click.argument("value")
 @click.pass_context
 def select_cmd(
-    ctx: click.Context, ext_id: int, tab_id: int, index: int, value: str
+    ctx: click.Context, ext_id: str, tab_id: int, index: int, value: str
 ) -> None:
     """Select VALUE in the element at INDEX."""
     _command(
@@ -375,23 +487,23 @@ def select_cmd(
 
 
 @main.command()
-@click.argument("ext_id", type=int)
+@click.argument("ext_id")
 @click.argument("tab_id", type=int)
 @click.argument("combo")
 @click.pass_context
-def keys(ctx: click.Context, ext_id: int, tab_id: int, combo: str) -> None:
+def keys(ctx: click.Context, ext_id: str, tab_id: int, combo: str) -> None:
     """Press a key combo, e.g. \"Control+Shift+K\", \"Enter\", \"Alt+ArrowLeft\"."""
     _command(ctx, ext_id, "press_keys", {"tab_id": tab_id, "keys": combo})
     click.echo("ok")
 
 
 @main.command(name="click-xy")
-@click.argument("ext_id", type=int)
+@click.argument("ext_id")
 @click.argument("tab_id", type=int)
 @click.argument("x", type=float)
 @click.argument("y", type=float)
 @click.pass_context
-def click_xy(ctx: click.Context, ext_id: int, tab_id: int, x: float, y: float) -> None:
+def click_xy(ctx: click.Context, ext_id: str, tab_id: int, x: float, y: float) -> None:
     """Click at viewport coordinates (X, Y)."""
     data = _command(ctx, ext_id, "click_xy", {"tab_id": tab_id, "x": x, "y": y})
     tag = data.get("tag", "?")
@@ -400,23 +512,23 @@ def click_xy(ctx: click.Context, ext_id: int, tab_id: int, x: float, y: float) -
 
 
 @main.command(context_settings={"allow_interspersed_args": False})
-@click.argument("ext_id", type=int)
+@click.argument("ext_id")
 @click.argument("tab_id", type=int)
 @click.argument("dy", type=int)
 @click.option("--dx", type=int, default=0, help="Horizontal scroll pixels (positive = right)")
 @click.pass_context
-def scroll(ctx: click.Context, ext_id: int, tab_id: int, dy: int, dx: int) -> None:
+def scroll(ctx: click.Context, ext_id: str, tab_id: int, dy: int, dx: int) -> None:
     """Scroll the tab by DY pixels (negative = up)."""
     data = _command(ctx, ext_id, "scroll", {"tab_id": tab_id, "dx": dx, "dy": dy})
     click.echo(f"scroll position: x={data.get('x', 0)} y={data.get('y', 0)}")
 
 
 @main.command()
-@click.argument("ext_id", type=int)
+@click.argument("ext_id")
 @click.argument("tab_id", type=int)
 @click.argument("path", type=click.Path())
 @click.pass_context
-def screenshot(ctx: click.Context, ext_id: int, tab_id: int, path: str) -> None:
+def screenshot(ctx: click.Context, ext_id: str, tab_id: int, path: str) -> None:
     """Capture a screenshot and write it to PATH."""
     data = _command(ctx, ext_id, "screenshot", {"tab_id": tab_id}, timeout=60.0)
     png = base64.b64decode(str(data.get("png_base64", "")))
@@ -425,11 +537,11 @@ def screenshot(ctx: click.Context, ext_id: int, tab_id: int, path: str) -> None:
 
 
 @main.command()
-@click.argument("ext_id", type=int)
+@click.argument("ext_id")
 @click.argument("tab_id", type=int)
 @click.argument("path", type=click.Path())
 @click.pass_context
-def annotate(ctx: click.Context, ext_id: int, tab_id: int, path: str) -> None:
+def annotate(ctx: click.Context, ext_id: str, tab_id: int, path: str) -> None:
     """Capture an annotated screenshot to PATH and print the elements table."""
     data = _command(ctx, ext_id, "annotate", {"tab_id": tab_id}, timeout=60.0)
     png = base64.b64decode(str(data.get("png_base64", "")))
@@ -439,12 +551,12 @@ def annotate(ctx: click.Context, ext_id: int, tab_id: int, path: str) -> None:
 
 
 @main.command()
-@click.argument("ext_id", type=int)
+@click.argument("ext_id")
 @click.argument("tab_id", type=int)
 @click.option("-o", "--output", "output", type=click.Path(), default=None,
               help="Write tree to this file instead of stdout.")
 @click.pass_context
-def a11y(ctx: click.Context, ext_id: int, tab_id: int, output: str | None) -> None:
+def a11y(ctx: click.Context, ext_id: str, tab_id: int, output: str | None) -> None:
     """Fetch the accessibility tree of a tab."""
     data = _command(ctx, ext_id, "get_a11y", {"tab_id": tab_id})
     tree = str(data.get("tree", ""))
@@ -456,40 +568,40 @@ def a11y(ctx: click.Context, ext_id: int, tab_id: int, output: str | None) -> No
 
 
 @main.command(name="close")
-@click.argument("ext_id", type=int)
+@click.argument("ext_id")
 @click.argument("tab_id", type=int)
 @click.pass_context
-def close_cmd(ctx: click.Context, ext_id: int, tab_id: int) -> None:
+def close_cmd(ctx: click.Context, ext_id: str, tab_id: int) -> None:
     """Close a tab."""
     _command(ctx, ext_id, "close_tab", {"tab_id": tab_id})
     click.echo("ok")
 
 
 @main.command()
-@click.argument("ext_id", type=int)
+@click.argument("ext_id")
 @click.argument("tab_id", type=int)
 @click.pass_context
-def reload(ctx: click.Context, ext_id: int, tab_id: int) -> None:
+def reload(ctx: click.Context, ext_id: str, tab_id: int) -> None:
     """Reload a tab."""
     _command(ctx, ext_id, "reload_tab", {"tab_id": tab_id})
     click.echo("ok")
 
 
 @main.command()
-@click.argument("ext_id", type=int)
+@click.argument("ext_id")
 @click.argument("tab_id", type=int)
 @click.pass_context
-def back(ctx: click.Context, ext_id: int, tab_id: int) -> None:
+def back(ctx: click.Context, ext_id: str, tab_id: int) -> None:
     """Go back in a tab's history."""
     _command(ctx, ext_id, "go_back", {"tab_id": tab_id})
     click.echo("ok")
 
 
 @main.command()
-@click.argument("ext_id", type=int)
+@click.argument("ext_id")
 @click.argument("tab_id", type=int)
 @click.pass_context
-def forward(ctx: click.Context, ext_id: int, tab_id: int) -> None:
+def forward(ctx: click.Context, ext_id: str, tab_id: int) -> None:
     """Go forward in a tab's history."""
     _command(ctx, ext_id, "go_forward", {"tab_id": tab_id})
     click.echo("ok")

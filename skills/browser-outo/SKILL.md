@@ -9,7 +9,25 @@ Drive the user's real, already-authenticated browser from a local CLI/agent thro
 
 ## Architecture
 
-`browser-outo serve` runs a local HTTP/WebSocket server on `127.0.0.1:11681`. A browser extension (Chrome MV3 or Firefox MV2) installed in the user's browser opens an outbound WebSocket to that server and is assigned a numeric `EXT_ID`. All commands take the form `browser-outo <cmd> EXT_ID ...`. Multiple browsers/extensions can connect at once; each gets its own `EXT_ID`. Network traffic stays local.
+Two transports; the native one is the default once `install-native` has been run.
+
+- **Native (default):** the browser spawns the native host process and
+  the extension talks to it over stdio. The same host also listens on a
+  per-user Unix socket so the CLI can talk to it. No TCP port is
+  involved.
+- **WebSocket (fallback):** `browser-outo serve` runs an HTTP/WebSocket
+  server on `127.0.0.1:11681` and the extension opens an outbound
+  WebSocket to it. The server writes a per-run bearer token at startup;
+  `/api/*` requires it, `GET /` is open as a health probe, `/ws` only
+  accepts `chrome-extension://` and `moz-extension://` origins.
+
+The CLI picks native mode automatically when a host socket is present,
+otherwise it uses the WebSocket path. All commands take the form
+`browser-outo <cmd> EXT_ID ...`. In native mode `EXT_ID` is the browser
+name (`chrome`/`firefox`) or its numeric index from `extensions`; in
+WebSocket mode it's a numeric ID assigned at connect time. Multiple
+browsers/extensions can connect at once; each gets its own `EXT_ID`.
+Network traffic stays local.
 
 ## Installation
 
@@ -32,13 +50,32 @@ Load the extension:
 - Chrome: `chrome://extensions` → enable Developer mode → "Load unpacked" → select `extension/chrome`.
 - Firefox: `about:debugging` → "This Firefox" → "Load Temporary Add-on..." → select `extension/firefox/manifest.json`.
 
-Then start the server:
+The Chrome extension is pinned to ID
+`jdpmmcbgncnlmcaaggkfccdmehkgnkjc`. After pulling updates, hit
+"Reload" on `chrome://extensions`; the first reload after the pin
+landed will switch the on-screen ID to the pinned value, and the next
+reload keeps it. The matching private key lives at
+`~/.config/browser-outo/extension-key.pem` (mode `0600`) and is never
+checked in.
+
+Then, **once per machine**, enable the native transport:
 
 ```bash
-browser-outo serve &
+browser-outo install-native
 ```
 
-Run it in the background. The extension auto-connects on load; no pairing code.
+This writes the native host wrapper plus the Chrome and Firefox manifest
+files (Linux: `~/.config/google-chrome/`, `~/.config/chromium/`,
+`~/.mozilla/`, `~/.config/mozilla/`; macOS equivalents; Windows is
+unsupported and stays on WebSocket). The command is idempotent —
+re-run it any time to refresh. After it completes, reload the
+extension again; from then on the extension console will show
+`[outo] transport: native` and no TCP port is used.
+
+`browser-outo serve` is only needed for the WebSocket fallback path —
+if `install-native` is in place you can usually skip it. Keep it
+available in case a browser falls back (manifest removed, locked-down
+profile, etc.).
 
 **Be patient after startup.** The extension discovers the server with a retry loop (backoff up to 30s), and the first connection after a server (re)start can take anywhere from a few seconds to ~2 minutes depending on where the retry timer is. If `browser-outo extensions` returns an empty list, do NOT give up — wait 30 seconds and try again, repeating for up to 2 minutes. Only then suspect a real problem (extension not installed, browser closed, wrong port).
 
@@ -47,10 +84,20 @@ Run it in the background. The extension auto-connects on load; no pairing code.
 ### Server
 
 ```bash
-browser-outo serve [--port 11681] [--host 127.0.0.1]
+browser-outo serve [--port 11681] [--host 127.0.0.1] [--allow-remote]
 ```
 
-Start the local server. Defaults bind to `127.0.0.1:11681`. After starting, confirm it is up with `curl http://127.0.0.1:11681/` or simply run `browser-outo extensions` (a connection error means the server is not running — start it).
+Start the local WebSocket fallback server. Defaults bind to
+`127.0.0.1:11681`; the server refuses a non-loopback bind unless you
+pass `--allow-remote`. Each start writes a fresh per-run bearer token
+(`token-<port>`) into a per-user state directory; the CLI picks it up
+automatically, `/api/*` requires it, and `GET /` is open as a health
+probe.
+
+You do NOT need this when the native transport is in use — only start
+it for the WebSocket fallback path. Confirm it is up with
+`curl http://127.0.0.1:11681/` or simply run `browser-outo extensions`
+(a connection error means the server is not running).
 
 ### Discovery
 
@@ -58,7 +105,12 @@ Start the local server. Defaults bind to `127.0.0.1:11681`. After starting, conf
 browser-outo extensions
 ```
 
-List connected extensions. Output: `EXT_ID, browser, version, connected_at`. **Always run this first** to discover available `EXT_ID`s. Empty list means the extension is not installed or no browser is open.
+List connected extensions. Output:
+`EXT_ID, browser, version, connected_at, transport`. The `transport`
+column is `native` or `websocket` and shows which path each extension
+is currently using — prefer this over guessing from `EXT_ID` alone.
+**Always run this first** to discover available `EXT_ID`s. Empty list
+means the extension is not installed or no browser is open.
 
 ### Tabs
 
@@ -66,7 +118,7 @@ List connected extensions. Output: `EXT_ID, browser, version, connected_at`. **A
 browser-outo open EXT_ID URL [--background]
 ```
 
-Open a new tab at `URL`. Prints the new `TAB_ID`. `--background` opens the tab without focusing it.
+Open a new tab at `URL`. Prints the new `TAB_ID`. `--background` opens the tab without focusing it. In native mode `EXT_ID` is the browser name (`chrome`/`firefox`) or the numeric index from `extensions`; in WebSocket mode it's the numeric ID assigned at connect time.
 
 ```bash
 browser-outo tabs EXT_ID
@@ -176,7 +228,17 @@ command -v browser-outo    # if missing: uv tool install browser-outo (or pipx/p
 browser-outo extensions
 ```
 
-If connection error: server is not running. Start it yourself in the background:
+Look at the `transport` column first. If at least one row shows
+`native`, you're done — the CLI is talking to the browser through the
+native host and you do not need `browser-outo serve` at all.
+
+If the list is empty, the install is incomplete. If you've never run
+`browser-outo install-native`, do that once per machine first — it's
+idempotent. If you have, reload the extension on
+`chrome://extensions` / `about:debugging` and re-check.
+
+If you intentionally skipped native install and want the WebSocket
+path, start the server in the background:
 
 ```bash
 browser-outo serve &
@@ -236,3 +298,16 @@ Prefer `a11y` or `html` + parse over `screenshot`. The accessibility tree is the
 - **Screenshot side effect.** `screenshot` activates the tab; the user will see it switch.
 - **Per-tab indices.** `INDEX` is scoped to the current `TAB_ID` and most recent `elements` call — never reuse indices across tabs.
 - **Server gone.** If commands hang or fail with connection errors, the server may have stopped; restart with `browser-outo serve &`.
+- **Exit code 3 — outcome unknown.** In native mode the transport can
+  vanish mid-command (service worker restart, host crash, browser tab
+  closed underneath the extension). When that happens, browser-outo
+  exits with code 3 and prints that the side-effect status is
+  unknown. Do NOT auto-retry clicks, opens, or any other
+  non-idempotent action — the first attempt may already have landed.
+  Verify the page state (`elements`, `tabs`, or `screenshot`) before
+  deciding what to do next.
+- **Chrome extension reload after update.** After pulling code
+  changes, hit "Reload" on `chrome://extensions`. Skip the reload and
+  the on-screen ID stays the old one, so the native messaging
+  allowlist will silently reject the connection and the extension
+  will fall back to WebSocket.

@@ -11,19 +11,22 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
 import logging
+import sys
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
+
+from .auth import write_token
 
 logger = logging.getLogger("browser_outo.server")
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 # Heartbeat: server pings every N seconds. Pongs are tolerated-but-optional.
 PING_INTERVAL = 20.0
@@ -137,21 +140,35 @@ class CommandRequest(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
-def create_app() -> FastAPI:
+def create_app(port: int) -> FastAPI:
     """Build a fresh FastAPI app with its own ConnectionRegistry.
 
-    No module-level state — safe to import repeatedly in tests.
+    Writes a per-run auth token to ``token-<port>`` on construction. All
+    ``/api/*`` routes require ``Authorization: Bearer <token>`` thereafter.
+    ``GET /`` (health probe) stays unauthenticated — the browser extension
+    uses it as a server-up check before the CLI has shared the token.
     """
     app = FastAPI(title="browser-outo", version=VERSION)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+
+    auth_token, token_path = write_token(port)
+    # Never log the token itself — only its on-disk location.
+    print(f"auth token written to {token_path}", file=sys.stderr)
 
     registry = ConnectionRegistry()
     app.state.registry = registry
+    app.state.auth_token = auth_token
+
+    def _require_auth(authorization: str | None = Header(default=None)) -> None:
+        """Reject any /api/* call without a matching bearer token.
+
+        ``hmac.compare_digest`` is constant-time so the response latency
+        does not leak how close a guessed token was.
+        """
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="missing bearer token")
+        provided = authorization[len("Bearer "):]
+        if not hmac.compare_digest(provided, auth_token):
+            raise HTTPException(status_code=401, detail="invalid token")
 
     # ---------------------------- HTTP routes ---------------------------- #
 
@@ -159,11 +176,11 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, Any]:
         return {"ok": True, "service": "browser-outo", "version": VERSION}
 
-    @app.get("/api/extensions")
+    @app.get("/api/extensions", dependencies=[Depends(_require_auth)])
     async def list_extensions() -> dict[str, Any]:
         return {"ok": True, "data": registry.list_info()}
 
-    @app.post("/api/command")
+    @app.post("/api/command", dependencies=[Depends(_require_auth)])
     async def post_command(req: CommandRequest) -> dict[str, Any]:
         conn = registry.get(req.ext_id)
         if conn is None:
@@ -197,6 +214,22 @@ def create_app() -> FastAPI:
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket) -> None:
+        # Drive-by guard: browsers ALWAYS send an `Origin` header on every
+        # WebSocket opened from a web page (RFC 6454). Browser-extension
+        # service workers send chrome-extension:// / moz-extension:// origins
+        # (allowed here). Local non-browser clients (the CLI, test harnesses)
+        # send no Origin at all (also allowed). Any OTHER origin — meaning a
+        # web page the user is browsing — is rejected with 1008 BEFORE
+        # ws.accept(), so the WS handshake never completes and a malicious
+        # site cannot register a fake extension or sniff the protocol.
+        origin = ws.headers.get("origin")
+        if origin is not None and not (
+            origin.startswith("chrome-extension://")
+            or origin.startswith("moz-extension://")
+        ):
+            await ws.close(code=1008)
+            return
+
         await ws.accept()
 
         # Heartbeat: send {"type":"ping"} every PING_INTERVAL seconds. Missing
@@ -306,7 +339,3 @@ def create_app() -> FastAPI:
                 pass
 
     return app
-
-
-# A module-level app for ``uvicorn browser_outo.server:app`` if anyone wants it.
-app = create_app()

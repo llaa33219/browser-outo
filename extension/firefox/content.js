@@ -20,9 +20,22 @@
   window.__outoContentInstalled = true;
 
   // ---------------------------------------------------------------- console buffer
+  //
+  // Per-page-load nonce handshake with pagehook.js (MAIN world). See the
+  // outoNonce comment below for the security model — this only stops
+  // accidental / low-effort forgery, not a determined page script.
 
   var CONSOLE_MAX = 500;
   var consoleEntries = [];
+
+  // KNOWN LIMITATION: pagehook.js runs in the page MAIN world, which shares
+  // its JS realm with the page itself. A determined page script can observe
+  // the init postMessage, capture the nonce, and forge entries that pass this
+  // check. This handshake only prevents accidental collisions and low-effort
+  // forgery — it is NOT a security boundary against the page.
+  var outoNonce = (typeof crypto !== "undefined" && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : (String(Math.random()).slice(2) + Date.now().toString(36));
 
   function pushConsoleEntry(level, text, timestamp) {
     consoleEntries.push({ level: level, text: text, timestamp: timestamp });
@@ -40,8 +53,26 @@
     if (!data || data.__outo !== true) {
       return;
     }
+    // Drop anything that isn't a console entry (e.g. our own init message).
+    if (data.kind !== "console") {
+      return;
+    }
+    // Drop entries that don't echo the nonce we issued at load time.
+    if (data.nonce !== outoNonce) {
+      return;
+    }
     pushConsoleEntry(data.level, data.text, data.timestamp || Date.now());
   });
+
+  // Tell pagehook (MAIN world) the per-load nonce so it can echo it back.
+  // Re-send a couple of times to win the load-order race against pagehook's
+  // MAIN-world listener (pagehook is idempotent: each init overwrites outoNonce).
+  function sendOutoInit() {
+    window.postMessage({ __outo: true, kind: "init", nonce: outoNonce }, "*");
+  }
+  sendOutoInit();
+  setTimeout(sendOutoInit, 100);
+  setTimeout(sendOutoInit, 500);
 
   // Some console output may happen before the pagehook lands (very rare with
   // document_start injection, but cover it anyway): also buffer from our own

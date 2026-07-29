@@ -49,10 +49,27 @@
     }).join(" ");
   }
 
+  // Per-page-load nonce handshake with content.js (isolated world). See the
+  // matching comment in content.js for the security model — this only stops
+  // accidental / low-effort forgery, not a determined page script.
+  let outoNonce = null;
+  window.addEventListener("message", (ev) => {
+    if (ev.source !== window) return;
+    const d = ev.data;
+    if (!d || d.__outo !== true) return;
+    if (d.kind === "init" && typeof d.nonce === "string") {
+      outoNonce = d.nonce;
+    }
+  });
+
   function post(level, text) {
+    if (outoNonce === null) return; // no nonce yet → content would drop anyway
     try {
       window.postMessage(
-        { __outo: true, kind: "console", level: level, text: text, ts: Date.now() / 1000 },
+        {
+          __outo: true, kind: "console", level: level, text: text,
+          ts: Date.now() / 1000, nonce: outoNonce
+        },
         "*"
       );
     } catch (_) { /* never let logging itself throw */ }

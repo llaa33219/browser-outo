@@ -13,7 +13,8 @@
 
 const WS_URL = "ws://127.0.0.1:11681/ws";
 const HEALTH_URL = "http://127.0.0.1:11681/";
-const EXT_VERSION = "0.1.0";
+const EXT_VERSION = "0.2.0";
+const NATIVE_HOST = "browser_outo";
 const PING_INTERVAL_MS = 20000;
 const KEEPALIVE_ALARM = "outo-keepalive";
 const RECONNECT_FLOOR_MS = 1000;
@@ -25,6 +26,13 @@ let registeredExtId = null;
 let backoffMs = RECONNECT_FLOOR_MS;
 let pingTimer = null;
 let reconnectTimer = null;
+
+// --- Native messaging transport state (preferred over WS when available) ---
+let nativePort = null;          // chrome.runtime.Port to the native host, or null
+let nativeConfirmed = false;    // has the native port delivered any message?
+let transport = null;           // "native" | "websocket" | null
+let nativeBackoffMs = RECONNECT_FLOOR_MS;
+let nativeReconnectTimer = null;
 
 // ==================================================================
 // WebSocket client
@@ -71,7 +79,7 @@ async function connectWS() {
 
   ws.onopen = () => {
     console.log("[outo] ws open, sending register");
-    wsSend({ type: "register", browser: "chrome", ext_version: EXT_VERSION });
+    sendFrame({ type: "register", browser: "chrome", ext_version: EXT_VERSION });
   };
 
   ws.onmessage = (ev) => {
@@ -108,7 +116,10 @@ function scheduleReconnect() {
   }, delay);
 }
 
-function wsSend(obj) {
+function sendFrame(obj) {
+  if (nativePort) {
+    try { nativePort.postMessage(obj); return true; } catch (e) { return false; }
+  }
   if (ws && ws.readyState === WebSocket.OPEN) {
     try {
       ws.send(JSON.stringify(obj));
@@ -118,6 +129,109 @@ function wsSend(obj) {
     }
   }
   return false;
+}
+
+// ==================================================================
+// Native messaging transport (preferred over WS when available)
+//
+// The native host speaks the exact same JSON protocol as the WS server;
+// only the transport differs. On connect we send the same register frame,
+// and route command/response/ping/pong through the shared handleServerMessage
+// pipeline. The WS path remains as fallback for users without the native
+// host installed.
+// ==================================================================
+function setTransport(t) {
+  if (transport === t) return;
+  transport = t;
+  console.log("[outo] transport: " + t);
+}
+
+function tryNative() {
+  if (nativePort || nativeReconnectTimer) return;
+
+  let port;
+  try {
+    port = chrome.runtime.connectNative(NATIVE_HOST);
+  } catch (e) {
+    onNativeUnavailable();
+    return;
+  }
+
+  nativePort = port;
+  nativeConfirmed = false;
+
+  port.onMessage.addListener((msg) => {
+    // First message confirms the host is real (not an immediate disconnect).
+    if (!nativeConfirmed) {
+      nativeConfirmed = true;
+      nativeBackoffMs = RECONNECT_FLOOR_MS;
+      teardownWSForNativeTakeover();
+      setTransport("native");
+    }
+    if (!msg || typeof msg !== "object") return;
+    handleServerMessage(msg);
+  });
+
+  port.onDisconnect.addListener(() => {
+    const err = chrome.runtime.lastError;
+    nativePort = null;
+    const wasConfirmed = nativeConfirmed;
+    nativeConfirmed = false;
+    stopPingTimer();
+    if (wasConfirmed || err) {
+      console.log("[outo] native disconnected" + (err && err.message ? ": " + err.message : ""));
+    }
+    setTransport("websocket");
+    connectWS();
+    scheduleNativeRetry();
+  });
+
+  try {
+    port.postMessage({ type: "register", browser: "chrome", ext_version: EXT_VERSION });
+  } catch (e) {
+    // onDisconnect will handle cleanup.
+  }
+}
+
+function teardownWSForNativeTakeover() {
+  if (ws) {
+    try { ws.onclose = null; ws.onerror = null; ws.close(); } catch (e) {}
+    ws = null;
+  }
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  backoffMs = RECONNECT_FLOOR_MS;
+}
+
+function onNativeUnavailable() {
+  setTransport("websocket");
+  connectWS();
+  scheduleNativeRetry();
+}
+
+function scheduleNativeRetry() {
+  if (nativeReconnectTimer) return;
+  const delay = nativeBackoffMs;
+  nativeBackoffMs = Math.min(nativeBackoffMs * 2, RECONNECT_CAP_MS);
+  nativeReconnectTimer = setTimeout(() => {
+    nativeReconnectTimer = null;
+    if (!nativePort) tryNative();
+  }, delay);
+}
+
+// Top-level transport selection: native-first. Called at SW wake, on alarm,
+// and after any disconnect. If native is pending, ensure WS fallback runs.
+function connectTransport() {
+  if (nativePort) return;
+  if (!nativeReconnectTimer) {
+    tryNative();
+    return;
+  }
+  if (!ws || (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING)) {
+    if (!reconnectTimer) connectWS();
+  }
 }
 
 // ==================================================================
@@ -133,7 +247,7 @@ function handleServerMessage(msg) {
       break;
 
     case "ping":
-      wsSend({ type: "pong" });
+      sendFrame({ type: "pong" });
       break;
 
     case "command":
@@ -154,8 +268,8 @@ function handleServerMessage(msg) {
 function startPingTimer() {
   if (pingTimer) return;
   pingTimer = setInterval(() => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      wsSend({ type: "ping" });
+    if (nativePort || (ws && ws.readyState === WebSocket.OPEN)) {
+      sendFrame({ type: "ping" });
     }
   }, PING_INTERVAL_MS);
 }
@@ -175,16 +289,16 @@ async function handleCommand(msg) {
   const action = msg.action;
   const params = msg.params || {};
   if (!reqId || !action) {
-    wsSend({ type: "response", req_id: reqId || null, ok: false, error: "malformed command" });
+    sendFrame({ type: "response", req_id: reqId || null, ok: false, error: "malformed command" });
     return;
   }
   try {
     const data = await dispatchAction(action, params);
-    wsSend({ type: "response", req_id: reqId, ok: true, data: data || {} });
+    sendFrame({ type: "response", req_id: reqId, ok: true, data: data || {} });
   } catch (e) {
     const errMsg = (e && e.message) ? e.message : String(e);
     console.warn("[outo] command failed", action, errMsg);
-    wsSend({ type: "response", req_id: reqId, ok: false, error: errMsg });
+    sendFrame({ type: "response", req_id: reqId, ok: false, error: errMsg });
   }
 }
 
@@ -509,13 +623,17 @@ async function captureTab(tabId) {
 chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (!alarm || alarm.name !== KEEPALIVE_ALARM) return;
-  // Both branches reset the SW idle timer: a WS send if connected, else a
+  // Both branches reset the SW idle timer: a send if connected, else a
   // reconnect attempt (which performs work on the SW).
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    wsSend({ type: "ping" });
-  } else {
-    connectWS();
+  if (transport === "native" && nativePort) {
+    sendFrame({ type: "ping" });
+    return;
   }
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    sendFrame({ type: "ping" });
+    return;
+  }
+  connectTransport();
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -558,11 +676,11 @@ async function reinjectContentScripts() {
 }
 
 // Ensure a connection on browser/profile startup and on install/update.
-chrome.runtime.onStartup.addListener(() => { connectWS(); });
-chrome.runtime.onInstalled.addListener(() => { connectWS(); reinjectContentScripts(); });
+chrome.runtime.onStartup.addListener(() => { connectTransport(); });
+chrome.runtime.onInstalled.addListener(() => { connectTransport(); reinjectContentScripts(); });
 
 // ==================================================================
-// SW startup — open the WS immediately. This top-level code runs on every
-// service-worker wake, which is exactly what we want.
+// SW startup — select transport (native-first). This top-level code runs
+// on every service-worker wake, which is exactly what we want.
 // ==================================================================
-connectWS();
+connectTransport();

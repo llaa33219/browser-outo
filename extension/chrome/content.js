@@ -40,16 +40,29 @@
   injectPagehook();
 
   // ------------------------------------------------------------------
-  // 2. Console ring buffer (fed by pagehook via window.postMessage)
+  // 2. Console ring buffer (fed by pagehook via window.postMessage).
+  //    Per-page-load nonce handshake: pagehook must echo back the nonce
+  //    we publish via the init message below.
+  //
+  //    KNOWN LIMITATION: pagehook runs in the page MAIN world, which
+  //    shares its JS realm with the page itself. A determined page script
+  //    can observe the init postMessage, capture the nonce, and forge
+  //    entries that pass this check. This handshake only prevents
+  //    accidental collisions and low-effort forgery — it is NOT a
+  //    security boundary against the page.
   // ------------------------------------------------------------------
   const MAX_CONSOLE = 500;
   const consoleBuffer = [];
+  const outoNonce = (typeof crypto !== "undefined" && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : (String(Math.random()).slice(2) + Date.now().toString(36));
 
   window.addEventListener("message", (ev) => {
     if (ev.source !== window) return;
     const d = ev.data;
     if (!d || d.__outo !== true) return;
     if (d.kind === "console") {
+      if (d.nonce !== outoNonce) return; // forged or pre-init entry: drop
       consoleBuffer.push({
         level: d.level,
         text: d.text,
@@ -58,6 +71,16 @@
       if (consoleBuffer.length > MAX_CONSOLE) consoleBuffer.shift();
     }
   });
+
+  // Tell pagehook (MAIN world) the per-load nonce so it can echo it back.
+  // Re-send a couple of times to win the load-order race against pagehook's
+  // MAIN-world listener (pagehook is idempotent: each init overwrites outoNonce).
+  function sendOutoInit() {
+    window.postMessage({ __outo: true, kind: "init", nonce: outoNonce }, "*");
+  }
+  sendOutoInit();
+  setTimeout(sendOutoInit, 100);
+  setTimeout(sendOutoInit, 500);
 
   // ------------------------------------------------------------------
   // 3. Element store — stable indices stable until next list_elements.
