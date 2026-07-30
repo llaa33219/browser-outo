@@ -66,7 +66,8 @@ npx skills add llaa33219/browser-outo
 
 **2. The browser extension** is available on the
 [Chrome Web Store](https://chromewebstore.google.com/detail/browser-outo/gpihpfdeknjocgdlgfmkhjkbjpahgggi)
-and coming soon to Firefox Add-ons.
+and
+[Firefox Add-ons](https://addons.mozilla.org/ja/firefox/addon/browser-outo/).
 
 **3. Start the local server:**
 
